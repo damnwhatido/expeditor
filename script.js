@@ -7,7 +7,7 @@ let lastValidLocation = null;
 let lastValidTime = 0;
 
 // Координати бази: вул. Аеропортівська, 4, Одеса
-const BASE_COORDS = [46.4395, 30.6690]; 
+const BASE_COORDS = [46.4288770, 30.6526377]; 
 
 function initMap() {
   if (!map) {
