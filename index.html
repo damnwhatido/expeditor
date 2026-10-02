@@ -1,31 +1,36 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="uk">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Экспедитор Навигатор</title>
+  <title>Експедитор Навігатор</title>
   
   <link rel="stylesheet" href="style.css">
-
-  <!-- Библиотека для чтения файлов Excel (.xls / .xlsx) -->
+  <!-- Карта Leaflet (OpenStreetMap/Google style) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
 
   <div class="container">
-    <h2>🚚 Экспедитор Навигатор</h2>
+    <h2>🚚 Експедитор Навігатор</h2>
 
     <div class="card">
       <label class="file-btn">
-        📁 Выбрать файл .xls / .xlsx
+        📁 Вибрати файл .xls / .xlsx
         <input type="file" id="excelFile" accept=".xls, .xlsx" hidden>
       </label>
-      <div id="fileName" class="status-text">Файл не выбран</div>
+      <div id="fileName" class="status-text">Файл не вибрано</div>
     </div>
 
     <button id="buildRouteBtn" class="main-btn" disabled>
-      🗺️ Построить маршрут в Google Maps
+      🗺️ Відкрити навігацію в Google Maps
     </button>
+
+    <!-- Інтерактивна карта з мітками -->
+    <div id="map" style="height: 300px; width: 100%; border-radius: 12px; margin-bottom: 20px; display: none;"></div>
 
     <div id="pointsList" class="points-container"></div>
   </div>
