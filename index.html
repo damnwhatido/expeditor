@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Экспедитор Навигатор</title>
+  
+  <link rel="stylesheet" href="style.css">
+
+  <!-- Библиотека для чтения файлов Excel (.xls / .xlsx) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+
+  <div class="container">
+    <h2>🚚 Экспедитор Навигатор</h2>
+
+    <div class="card">
+      <label class="file-btn">
+        📁 Выбрать файл .xls / .xlsx
+        <input type="file" id="excelFile" accept=".xls, .xlsx" hidden>
+      </label>
+      <div id="fileName" class="status-text">Файл не выбран</div>
+    </div>
+
+    <button id="buildRouteBtn" class="main-btn" disabled>
+      🗺️ Построить маршрут в Google Maps
+    </button>
+
+    <div id="pointsList" class="points-container"></div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
