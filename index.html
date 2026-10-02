@@ -2,11 +2,10 @@
 <html lang="uk">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Експедитор Навігатор</title>
   
   <link rel="stylesheet" href="style.css">
-  <!-- Карта Leaflet (OpenStreetMap/Google style) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -14,25 +13,29 @@
 </head>
 <body>
 
-  <div class="container">
-    <h2>🚚 Експедитор Навігатор</h2>
+  <!-- Інтерактивна карта на весь екран -->
+  <div id="map"></div>
 
-    <div class="card">
-      <label class="file-btn">
-        📁 Вибрати файл .xls / .xlsx
-        <input type="file" id="excelFile" accept=".xls, .xlsx" hidden>
-      </label>
-      <div id="fileName" class="status-text">Файл не вибрано</div>
+  <!-- Кнопка GPS центрування -->
+  <button id="gpsBtn" class="gps-btn" title="Де я?">🎯</button>
+
+  <!-- Висувна шторка зі списком точок -->
+  <div id="bottomSheet" class="bottom-sheet">
+    <div class="sheet-handle-area" id="sheetHandle">
+      <div class="sheet-handle"></div>
     </div>
+    
+    <div class="sheet-content">
+      <div class="card">
+        <label class="file-btn">
+          📁 Вибрати файл .xls / .xlsx
+          <input type="file" id="excelFile" accept=".xls, .xlsx" hidden>
+        </label>
+        <div id="fileName" class="status-text">Файл не вибрано</div>
+      </div>
 
-    <button id="buildRouteBtn" class="main-btn" disabled>
-      🗺️ Відкрити навігацію в Google Maps
-    </button>
-
-    <!-- Інтерактивна карта з мітками -->
-    <div id="map" style="height: 300px; width: 100%; border-radius: 12px; margin-bottom: 20px; display: none;"></div>
-
-    <div id="pointsList" class="points-container"></div>
+      <div id="pointsList" class="points-container"></div>
+    </div>
   </div>
 
   <script src="script.js"></script>
