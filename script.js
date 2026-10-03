@@ -6,7 +6,7 @@ let userMarker = null;
 let lastValidLocation = null;
 let lastValidTime = 0;
 
-// Точні координати вул. Аеропортівська, 4
+// Точні координати бази: вул. Аеропортівська, 4
 const BASE_COORDS = [46.4288770, 30.6526377]; 
 
 function initMap() {
@@ -19,7 +19,7 @@ function initMap() {
     routePolylineGroup = L.layerGroup().addTo(map);
     markersGroup = L.layerGroup().addTo(map);
 
-    // Синій квадрат з білим будиночком (як у додатку)
+    // Синій квадрат з білим будиночком (База)
     const homeIcon = L.divIcon({
       className: 'home-marker-container',
       html: `
@@ -126,14 +126,44 @@ document.getElementById('excelFile').addEventListener('change', function(e) {
   reader.readAsArrayBuffer(file);
 });
 
-// Допоміжна функція очищення адреси
+// Очищення сміття з адрес для максимального попадання
 function cleanAddress(addr) {
   return addr.replace(/Кофе\s*-\s*/gi, '')
              .replace(/Копійка\s*-\s*/gi, '')
              .replace(/Хлібзавод\s*\d*\s*-\s*/gi, '')
              .replace(/Магазин\s*-\s*/gi, '')
              .replace(/Вівіат\s*-\s*/gi, '')
+             .replace(/Віват\s*-\s*/gi, '')
              .trim();
+}
+
+async function fetchCoordinates(query) {
+  const cleanQ = cleanAddress(query);
+  
+  // 1. Спроба через надшвидкий Photon API
+  try {
+    const res = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(cleanQ + ' Одеса')}&limit=1`);
+    const data = await res.json();
+    if (data && data.features && data.features.length > 0) {
+      const coords = data.features[0].geometry.coordinates;
+      return [coords[1], coords[0]]; // Photon віддає [lon, lat]
+    }
+  } catch (e) {
+    console.warn("Photon error:", e);
+  }
+
+  // 2. Резервна спроба через Nominatim
+  try {
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanQ)}`);
+    const data = await res.json();
+    if (data && data.length > 0) {
+      return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+    }
+  } catch (e) {
+    console.warn("Nominatim error:", e);
+  }
+
+  return null;
 }
 
 async function parseExcelData(rows) {
@@ -214,7 +244,6 @@ async function parseExcelData(rows) {
     pointsToGeocode.push({
       number: count,
       address: fullAddress,
-      searchQuery: cleanAddress(fullAddress),
       clientName,
       weight,
       invoices,
@@ -226,71 +255,61 @@ async function parseExcelData(rows) {
   processPointsGeocoding(pointsToGeocode);
 }
 
-// Пакетне геокодування з інтервалом для запобігання блокувань
 async function processPointsGeocoding(points) {
   const routeCoords = [BASE_COORDS];
 
   for (const p of points) {
-    try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(p.searchQuery)}`);
-      const data = await res.json();
+    const coords = await fetchCoordinates(p.address);
 
-      if (data && data.length > 0) {
-        const lat = parseFloat(data[0].lat);
-        const lon = parseFloat(data[0].lon);
-        const pointCoords = [lat, lon];
+    if (coords) {
+      routeCoords.push(coords);
 
-        routeCoords.push(pointCoords);
+      // Оранжева пипка з номером
+      const orangeIcon = L.divIcon({
+        className: 'orange-pin-marker',
+        html: `
+          <div style="position: relative; width: 30px; height: 38px; display: flex; justify-content: center; align-items: center;">
+            <svg width="30" height="38" viewBox="0 0 30 38" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M15 0C6.71573 0 0 6.71573 0 15C0 26.25 15 38 15 38C15 38 30 26.25 30 15C30 6.71573 23.2843 0 15 0Z" fill="#F36B21" stroke="#FFFFFF" stroke-width="2"/>
+              <circle cx="15" cy="14" r="9" fill="#F36B21"/>
+            </svg>
+            <span style="position: absolute; top: 5px; color: #ffffff; font-weight: bold; font-size: 11px; text-shadow: 0 1px 2px rgba(0,0,0,0.6);">${p.number}</span>
+          </div>`,
+        iconSize: [30, 38],
+        iconAnchor: [15, 38],
+        popupAnchor: [0, -34]
+      });
 
-        // Помаранчева пипка з білим обводком та номером (як у додатку)
-        const orangeIcon = L.divIcon({
-          className: 'orange-pin-marker',
-          html: `
-            <div style="position: relative; width: 30px; height: 38px; display: flex; justify-content: center; align-items: center;">
-              <svg width="30" height="38" viewBox="0 0 30 38" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M15 0C6.71573 0 0 6.71573 0 15C0 26.25 15 38 15 38C15 38 30 26.25 30 15C30 6.71573 23.2843 0 15 0Z" fill="#F36B21" stroke="#FFFFFF" stroke-width="2"/>
-                <circle cx="15" cy="14" r="9" fill="#F36B21"/>
-              </svg>
-              <span style="position: absolute; top: 5px; color: #ffffff; font-weight: bold; font-size: 11px; text-shadow: 0 1px 2px rgba(0,0,0,0.6);">${p.number}</span>
-            </div>`,
-          iconSize: [30, 38],
-          iconAnchor: [15, 38],
-          popupAnchor: [0, -34]
-        });
+      const popupContent = `
+        <div style="font-size: 13px; color: #111; line-height: 1.4;">
+          <b style="font-size: 15px; color: #F36B21;">📍 Точка №${p.number}</b><br>
+          <b>Клієнт:</b> ${p.clientName}<br>
+          <b>Адреса:</b> ${p.address}<br>
+          ${p.weight ? `<b>Вага:</b> ${p.weight}<br>` : ''}
+          ${p.invoices ? `<b>Кількість накладних:</b> ${p.invoices}<br>` : ''}
+        </div>
+      `;
 
-        const popupContent = `
-          <div style="font-size: 13px; color: #111; line-height: 1.4;">
-            <b style="font-size: 15px; color: #F36B21;">📍 Точка №${p.number}</b><br>
-            <b>Клієнт:</b> ${p.clientName}<br>
-            <b>Адреса:</b> ${p.address}<br>
-            ${p.weight ? `<b>Вага:</b> ${p.weight}<br>` : ''}
-            ${p.invoices ? `<b>Кількість накладних:</b> ${p.invoices}<br>` : ''}
-          </div>
-        `;
+      const marker = L.marker(coords, { icon: orangeIcon }).addTo(markersGroup);
+      marker.bindPopup(popupContent);
 
-        const marker = L.marker(pointCoords, { icon: orangeIcon }).addTo(markersGroup);
-        marker.bindPopup(popupContent);
-
-        p.cardElement.addEventListener('click', () => {
-          map.setView(pointCoords, 16);
-          marker.openPopup();
-          sheet.classList.remove('expanded');
-        });
-      }
-    } catch (err) {
-      console.warn("Помилка геокодування точки №" + p.number, err);
+      p.cardElement.addEventListener('click', () => {
+        map.setView(coords, 16);
+        marker.openPopup();
+        sheet.classList.remove('expanded');
+      });
     }
 
-    // Затримка 400мс, щоб сервер OpenStreetMap не блокував запити
-    await new Promise(resolve => setTimeout(resolve, 400));
+    // Коротка затримка між розпізнаваннями
+    await new Promise(resolve => setTimeout(resolve, 150));
   }
 
-  // Малюємо помаранчеву лінію маршруту
+  // Нанесення оранжевої маршрутної лінії
   if (routeCoords.length > 1) {
     L.polyline(routeCoords, {
       color: '#F36B21',
       weight: 5,
-      opacity: 0.8,
+      opacity: 0.85,
       lineJoin: 'round'
     }).addTo(routePolylineGroup);
 
@@ -298,6 +317,5 @@ async function processPointsGeocoding(points) {
   }
 }
 
-// Старт карти
+// Запуск
 initMap();
-    
