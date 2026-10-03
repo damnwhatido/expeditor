@@ -1,12 +1,12 @@
 let map = null;
 let markersGroup = null;
+let routePolylineGroup = null;
 let userMarker = null;
 
-// Останній надійний координаційний пункт та час
 let lastValidLocation = null;
 let lastValidTime = 0;
 
-// Координати бази: вул. Аеропортівська, 4, Одеса
+// Точні координати вул. Аеропортівська, 4
 const BASE_COORDS = [46.4288770, 30.6526377]; 
 
 function initMap() {
@@ -16,14 +16,27 @@ function initMap() {
       attribution: '© OpenStreetMap'
     }).addTo(map);
 
+    routePolylineGroup = L.layerGroup().addTo(map);
     markersGroup = L.layerGroup().addTo(map);
 
-    // Синій будиночок (База / Виїзд)
+    // Синій квадрат з білим будиночком (як у додатку)
     const homeIcon = L.divIcon({
-      className: 'home-icon-marker',
-      html: '<div style="font-size:22px; background:#fff; border:2px solid #007bff; border-radius:50%; width:36px; height:36px; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,0.4);">🏠</div>',
-      iconSize: [36, 36],
-      iconAnchor: [18, 18]
+      className: 'home-marker-container',
+      html: `
+        <div style="
+          background-color: #5c55e3; 
+          width: 32px; 
+          height: 32px; 
+          border-radius: 8px; 
+          display: flex; 
+          align-items: center; 
+          justify-content: center; 
+          box-shadow: 0 3px 6px rgba(0,0,0,0.4);
+          border: 2px solid #ffffff;">
+          <span style="color: white; font-size: 18px; font-weight: bold; line-height: 1;">🏠</span>
+        </div>`,
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
     });
 
     const baseMarker = L.marker(BASE_COORDS, { icon: homeIcon }).addTo(map);
@@ -33,55 +46,36 @@ function initMap() {
   }
 }
 
-// Обчислення відстані між двома точками в метрах (Формула гаверсинусів)
-function getDistanceMeters(lat1, lon1, lat2, lon2) {
-  const R = 6371000;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-            Math.sin(dLon/2) * Math.sin(dLon/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c;
-}
-
-// Захищена геолокація (Захист від глушилок та спуфінгу)
+// Захист від глушилок GPS
 function startGPSWithAntiSpoofing() {
   if ("geolocation" in navigator) {
     navigator.geolocation.watchPosition(
       (pos) => {
         const lat = pos.coords.latitude;
         const lon = pos.coords.longitude;
-        const accuracy = pos.coords.accuracy; // Похибка в метрах
+        const accuracy = pos.coords.accuracy;
         const currentTime = Date.now();
 
-        // 1. Фільтр за похибкою (якщо глушилка дає похибку > 150 метрів — ігноруємо)
-        if (accuracy > 150) {
-          console.warn("Слабкий або викривлений GPS-сигнал (похибка:", accuracy, "м)");
-          return;
-        }
+        if (accuracy > 150) return;
 
-        // 2. Фільтр телепортації (перевірка реальної швидкості)
         if (lastValidLocation && lastValidTime > 0) {
-          const distance = getDistanceMeters(lastValidLocation.lat, lastValidLocation.lon, lat, lon);
+          const R = 6371000;
+          const dLat = (lat - lastValidLocation.lat) * Math.PI / 180;
+          const dLon = (lon - lastValidLocation.lon) * Math.PI / 180;
+          const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(lastValidLocation.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) *
+                    Math.sin(dLon/2) * Math.sin(dLon/2);
+          const distance = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
           const timeDiffSeconds = (currentTime - lastValidTime) / 1000;
 
-          if (timeDiffSeconds > 0) {
-            const speedKmh = (distance / timeDiffSeconds) * 3.6;
-
-            // Якщо швидкість > 130 км/год — це 100% стрибок від глушилки/спуфінгу
-            if (speedKmh > 130) {
-              console.warn(`Заблоковано аномальний стрибок GPS! Відстань: ${distance.toFixed(0)}м, Швидкість: ${speedKmh.toFixed(0)} км/год`);
-              return; // Ігноруємо фальшиву точку
-            }
+          if (timeDiffSeconds > 0 && ((distance / timeDiffSeconds) * 3.6) > 130) {
+            return; // Пропускаємо аномальний стрибок від глушилки
           }
         }
 
-        // Оновлюємо надійні координати
         lastValidLocation = { lat, lon };
         lastValidTime = currentTime;
 
-        // Малюємо маяк
         const userIcon = L.divIcon({
           className: 'user-location-beacon',
           iconSize: [16, 16],
@@ -90,39 +84,30 @@ function startGPSWithAntiSpoofing() {
 
         if (!userMarker) {
           userMarker = L.marker([lat, lon], { icon: userIcon }).addTo(map);
-          userMarker.bindPopup("<b>Ви тут (Реальна позиція)</b>");
+          userMarker.bindPopup("<b>Ви тут</b>");
         } else {
           userMarker.setLatLng([lat, lon]);
         }
       },
-      (err) => {
-        console.warn("Помилка GPS:", err.message);
-      },
+      (err) => console.warn(err),
       { enableHighAccuracy: true, maximumAge: 3000, timeout: 10000 }
     );
   }
 }
 
-// Кнопка центрування на GPS
-document.getElementById('gpsBtn').addEventListener('click', () => {
+document.getElementById('gpsBtn')?.addEventListener('click', () => {
   if (userMarker && lastValidLocation) {
     map.setView([lastValidLocation.lat, lastValidLocation.lon], 16);
-  } else {
-    alert("Очікуємо надійний сигнал GPS...");
   }
 });
 
-// Шторка BottomSheet
 const sheet = document.getElementById('bottomSheet');
 const handle = document.getElementById('sheetHandle');
-
 if (handle) {
-  handle.addEventListener('click', () => {
-    sheet.classList.toggle('expanded');
-  });
+  handle.addEventListener('click', () => sheet.classList.toggle('expanded'));
 }
 
-// Читання Excel
+// Завантаження Excel
 document.getElementById('excelFile').addEventListener('change', function(e) {
   const file = e.target.files ? e.target.files[0] : null;
   if (!file) return;
@@ -141,12 +126,25 @@ document.getElementById('excelFile').addEventListener('change', function(e) {
   reader.readAsArrayBuffer(file);
 });
 
+// Допоміжна функція очищення адреси
+function cleanAddress(addr) {
+  return addr.replace(/Кофе\s*-\s*/gi, '')
+             .replace(/Копійка\s*-\s*/gi, '')
+             .replace(/Хлібзавод\s*\d*\s*-\s*/gi, '')
+             .replace(/Магазин\s*-\s*/gi, '')
+             .replace(/Вівіат\s*-\s*/gi, '')
+             .trim();
+}
+
 async function parseExcelData(rows) {
   const listContainer = document.getElementById('pointsList');
   if (listContainer) listContainer.innerHTML = '';
   
   markersGroup.clearLayers();
+  routePolylineGroup.clearLayers();
+
   let count = 0;
+  const pointsToGeocode = [];
 
   for (const row of rows) {
     if (!row || !Array.isArray(row) || row.length === 0) continue;
@@ -213,68 +211,93 @@ async function parseExcelData(rows) {
     `;
     if (listContainer) listContainer.appendChild(card);
 
-    // Додаємо точку на карту з затримкою
-    geocodeAndAddMarker(fullAddress, count, clientName, weight, invoices, card);
+    pointsToGeocode.push({
+      number: count,
+      address: fullAddress,
+      searchQuery: cleanAddress(fullAddress),
+      clientName,
+      weight,
+      invoices,
+      cardElement: card
+    });
   }
 
   sheet.classList.remove('expanded');
+  processPointsGeocoding(pointsToGeocode);
 }
 
-// Очищення адреси для надійного геокодування
-function cleanAddressForSearch(addr) {
-  return addr.replace(/Кофе\s*-\s*/gi, '')
-             .replace(/Копійка\s*-\s*/gi, '')
-             .replace(/Хлібзавод\s*\d*\s*-\s*/gi, '')
-             .replace(/Вівіат\s*-\s*/gi, '')
-             .trim();
+// Пакетне геокодування з інтервалом для запобігання блокувань
+async function processPointsGeocoding(points) {
+  const routeCoords = [BASE_COORDS];
+
+  for (const p of points) {
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(p.searchQuery)}`);
+      const data = await res.json();
+
+      if (data && data.length > 0) {
+        const lat = parseFloat(data[0].lat);
+        const lon = parseFloat(data[0].lon);
+        const pointCoords = [lat, lon];
+
+        routeCoords.push(pointCoords);
+
+        // Помаранчева пипка з білим обводком та номером (як у додатку)
+        const orangeIcon = L.divIcon({
+          className: 'orange-pin-marker',
+          html: `
+            <div style="position: relative; width: 30px; height: 38px; display: flex; justify-content: center; align-items: center;">
+              <svg width="30" height="38" viewBox="0 0 30 38" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M15 0C6.71573 0 0 6.71573 0 15C0 26.25 15 38 15 38C15 38 30 26.25 30 15C30 6.71573 23.2843 0 15 0Z" fill="#F36B21" stroke="#FFFFFF" stroke-width="2"/>
+                <circle cx="15" cy="14" r="9" fill="#F36B21"/>
+              </svg>
+              <span style="position: absolute; top: 5px; color: #ffffff; font-weight: bold; font-size: 11px; text-shadow: 0 1px 2px rgba(0,0,0,0.6);">${p.number}</span>
+            </div>`,
+          iconSize: [30, 38],
+          iconAnchor: [15, 38],
+          popupAnchor: [0, -34]
+        });
+
+        const popupContent = `
+          <div style="font-size: 13px; color: #111; line-height: 1.4;">
+            <b style="font-size: 15px; color: #F36B21;">📍 Точка №${p.number}</b><br>
+            <b>Клієнт:</b> ${p.clientName}<br>
+            <b>Адреса:</b> ${p.address}<br>
+            ${p.weight ? `<b>Вага:</b> ${p.weight}<br>` : ''}
+            ${p.invoices ? `<b>Кількість накладних:</b> ${p.invoices}<br>` : ''}
+          </div>
+        `;
+
+        const marker = L.marker(pointCoords, { icon: orangeIcon }).addTo(markersGroup);
+        marker.bindPopup(popupContent);
+
+        p.cardElement.addEventListener('click', () => {
+          map.setView(pointCoords, 16);
+          marker.openPopup();
+          sheet.classList.remove('expanded');
+        });
+      }
+    } catch (err) {
+      console.warn("Помилка геокодування точки №" + p.number, err);
+    }
+
+    // Затримка 400мс, щоб сервер OpenStreetMap не блокував запити
+    await new Promise(resolve => setTimeout(resolve, 400));
+  }
+
+  // Малюємо помаранчеву лінію маршруту
+  if (routeCoords.length > 1) {
+    L.polyline(routeCoords, {
+      color: '#F36B21',
+      weight: 5,
+      opacity: 0.8,
+      lineJoin: 'round'
+    }).addTo(routePolylineGroup);
+
+    map.fitBounds(L.latLngBounds(routeCoords), { padding: [40, 40] });
+  }
 }
 
-function geocodeAndAddMarker(address, number, clientName, weight, invoices, cardElement) {
-  const cleanAddr = cleanAddressForSearch(address);
-
-  setTimeout(() => {
-    fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanAddr)}`)
-      .then(res => res.json())
-      .then(data => {
-        if (data && data.length > 0) {
-          const lat = parseFloat(data[0].lat);
-          const lon = parseFloat(data[0].lon);
-
-          // Створення червоного маркера з номером точки
-          const numberIcon = L.divIcon({
-            className: 'custom-number-marker',
-            html: `<div style="background-color:#d32f2f; color:#fff; font-weight:bold; border-radius:50%; width:28px; height:28px; display:flex; align-items:center; justify-content:center; border:2px solid #fff; box-shadow:0 2px 5px rgba(0,0,0,0.5); font-size:13px;">${number}</div>`,
-            iconSize: [28, 28],
-            iconAnchor: [14, 14]
-          });
-
-          const popupContent = `
-            <div style="font-size: 13px; color: #111; line-height: 1.4;">
-              <b style="font-size: 15px; color: #d32f2f;">📍 Точка №${number}</b><br>
-              <b>Клієнт:</b> ${clientName}<br>
-              <b>Адреса:</b> ${address}<br>
-              ${weight ? `<b>Вага:</b> ${weight}<br>` : ''}
-              ${invoices ? `<b>Кількість накладних:</b> ${invoices}<br>` : ''}
-            </div>
-          `;
-
-          const marker = L.marker([lat, lon], { icon: numberIcon }).addTo(markersGroup);
-          marker.bindPopup(popupContent);
-
-          cardElement.addEventListener('click', () => {
-            map.setView([lat, lon], 16);
-            marker.openPopup();
-            sheet.classList.remove('expanded');
-          });
-
-          const allLatLngs = markersGroup.getLayers().map(m => m.getLatLng());
-          allLatLngs.push(L.latLng(BASE_COORDS[0], BASE_COORDS[1]));
-          map.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
-        }
-      })
-      .catch(err => console.log('Помилка геокодування:', err));
-  }, number * 400);
-}
-
-// Запуск
+// Старт карти
 initMap();
+    
