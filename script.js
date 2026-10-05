@@ -3,6 +3,28 @@
 //  найшвидший маршрут, кілька маршрутів
 // ============================================================
 
+// Показує помилку прямо на екрані (на телефоні інакше її не видно)
+function showError(where, e) {
+  try {
+    const msg = '❌ ' + where + ': ' + ((e && e.message) || e);
+    console.error(msg, e);
+    let b = document.getElementById('err-banner');
+    if (!b) {
+      b = document.createElement('div');
+      b.id = 'err-banner';
+      b.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;z-index:99999;background:#b91c1c;color:#fff;' +
+                        'padding:10px 12px;border-radius:10px;font:12px/1.4 monospace;white-space:pre-wrap;' +
+                        'max-height:40vh;overflow:auto;';
+      (document.body || document.documentElement).appendChild(b);
+    }
+    b.textContent += msg + '\n';
+  } catch (err) { /* нічого не робимо */ }
+}
+window.addEventListener('error', ev => showError('Помилка (рядок ' + ev.lineno + ')', ev.message));
+window.addEventListener('unhandledrejection', ev => showError('Promise', ev.reason));
+if (typeof L === 'undefined') showError('Leaflet', 'бібліотека L не завантажилась, перевір підключення leaflet.js у HTML');
+if (typeof XLSX === 'undefined') showError('XLSX', 'бібліотека не завантажилась, Excel не читатиметься');
+
 // ⚠️ ЗМІНИ PIN. Він лежить у коді сайту, тому це захист від випадкових
 // змін, а не від зламу. Справжній захист потребує сервера.
 const ADMIN_PIN = '1234';
@@ -555,32 +577,4 @@ function refreshRoute(route) {
   route.points.forEach(p => refreshMarker(route, p, p === first));
 }
 
-// ---------- Список (нижня шторка) ----------
-function statusInfo(p) {
-  switch (p.state) {
-    case 'ok':      return ['✅ На карті', '#27ae60'];
-    case 'approx':  return [isAdmin ? '⚠️ Приблизно — перетягни піну на місце' : '⚠️ Приблизно (номер будинку не знайдено)', '#e67e22'];
-    case 'manual':  return ['📌 Виправлено вручну', '#2E86DE'];
-    case 'placing': return ['👆 Тапни на карті, де ця точка', '#2E86DE'];
-    case 'missing': return [isAdmin ? '⚠️ Не знайдено — тапни по картці, потім по карті' : '⚠️ Не знайдено на карті', '#e74c3c'];
-    default:        return ['⏳ Шукаю на карті…', '#999'];
-  }
-}
-
-function setStatus(p) {
-  if (!p.statusEl) return;
-  const [text, color] = statusInfo(p);
-  p.statusEl.textContent = text;
-  p.statusEl.style.color = color;
-}
-
-function updateHeader(route) {
-  if (!route.headerEl) return;
-  const parts = [`🚚 ${route.name}`, `${route.points.length} точок`];
-  if (route.distance) parts.push(`${(route.distance / 1000).toFixed(1)} км`);
-  if (route.duration) parts.push(`~${formatDuration(route.duration)}`);
-  if (route.optimized) parts.push('⚡');
-  route.headerEl.textContent = parts.join(' · ');
-}
-
-function toolBtn(text, onClick
+/
