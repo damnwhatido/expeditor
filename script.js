@@ -239,9 +239,15 @@ function parseWorkbook(workbook) {
 
 // ---------- Геокодинг ----------
 let geoCache = {};
-try { geoCache = JSON.parse(localStorage.getItem('geoCache_v2') || '{}'); } catch (e) { geoCache = {}; }
+let manualFixes = {};
+try { geoCache = JSON.parse(localStorage.getItem('geoCache_v3') || '{}'); } catch (e) { geoCache = {}; }
+try { manualFixes = JSON.parse(localStorage.getItem('manualFixes_v1') || '{}'); } catch (e) { manualFixes = {}; }
 function saveCache() {
-  try { localStorage.setItem('geoCache_v2', JSON.stringify(geoCache)); } catch (e) { /* ігноруємо */ }
+  try { localStorage.setItem('geoCache_v3', JSON.stringify(geoCache)); } catch (e) { /* ігноруємо */ }
+}
+function saveManual(p, coords) {
+  manualFixes[p.address.toLowerCase()] = coords;
+  try { localStorage.setItem('manualFixes_v1', JSON.stringify(manualFixes)); } catch (e) { /* ігноруємо */ }
 }
 
 let lastNominatimTime = 0;
@@ -254,11 +260,15 @@ async function tryPhoton(query) {
   try {
     const res = await fetch(url);
     const data = await res.json();
+    let fallback = null;
     for (const f of (data.features || [])) {
       const [lon, lat] = f.geometry.coordinates; // Photon: [lon, lat]
       const c = [lat, lon];
-      if (isInsideOdesaArea(c)) return c;
+      if (!isInsideOdesaArea(c)) continue;
+      if (f.properties && f.properties.housenumber) return { coords: c, exact: true };
+      if (!fallback) fallback = { coords: c, exact: false };
     }
+    return fallback;
   } catch (e) {
     console.warn('Photon error:', e);
   }
@@ -278,27 +288,40 @@ async function tryNominatim(query) {
   try {
     const res = await fetch(url);
     const data = await res.json();
+    let fallback = null;
     for (const item of (data || [])) {
       const c = [parseFloat(item.lat), parseFloat(item.lon)];
-      if (isInsideOdesaArea(c)) return c;
+      if (!isInsideOdesaArea(c)) continue;
+      const exact = item.type === 'house' || item.class === 'building' || item.addresstype === 'building';
+      if (exact) return { coords: c, exact: true };
+      if (!fallback) fallback = { coords: c, exact: false };
     }
+    return fallback;
   } catch (e) {
     console.warn('Nominatim error:', e);
   }
   return null;
 }
 
-// Повертає координати або null (ніколи не ставимо точку "на око")
+// Повертає { coords, exact, manual } або null (ніколи не ставимо точку "на око")
 async function geocode(point) {
   const key = point.address.toLowerCase();
+
+  if (manualFixes[key]) return { coords: manualFixes[key], exact: true, manual: true };
   if (geoCache[key]) return geoCache[key];
 
-  const coords = (await tryPhoton(point.address)) || (await tryNominatim(point.address + ', Україна'));
-  if (coords) {
-    geoCache[key] = coords;
+  const ph = await tryPhoton(point.address);
+  let result = ph;
+  if (!ph || !ph.exact) {
+    const nm = await tryNominatim(point.address + ', Україна');
+    if (nm && (nm.exact || !ph)) result = nm;
+  }
+
+  if (result) {
+    geoCache[key] = result;
     saveCache();
   }
-  return coords;
+  return result;
 }
 
 // ---------- Лінія маршруту по дорогах (OSRM) ----------
@@ -378,72 +401,123 @@ async function renderRoutes(routes) {
         <div class="geo-status point-address">⏳ Шукаю на карті…</div>`;
       listContainer?.appendChild(card);
       p.card = card;
+      p.route = route;
       p.statusEl = card.querySelector('.geo-status');
+      card.addEventListener('click', () => {
+        sheet?.classList.remove('expanded');
+        if (p.coords) {
+          map.setView(p.coords, 16);
+          p.marker?.openPopup();
+        } else {
+          placementTarget = p;
+          p.statusEl.textContent = '👆 Тапни на карті, де ця точка';
+          p.statusEl.style.color = '#2E86DE';
+        }
+      });
     });
   });
 
   sheet?.classList.remove('expanded');
 
   // 2) Геокодимо і малюємо по черзі
-  const allBounds = [BASE_COORDS];
-
   for (const route of routes) {
-    const routeCoords = [BASE_COORDS];
-
     for (const p of route.points) {
-      if (myRun !== runId) return; // завантажили інший файл — зупиняємось
-
-      const coords = await geocode(p);
-
-      if (!coords) {
-        p.statusEl.textContent = '⚠️ Не знайдено на карті — перевір адресу';
-        p.statusEl.style.color = '#e74c3c';
-        continue;
-      }
-
-      p.statusEl.textContent = '✅ На карті';
-      p.statusEl.style.color = '#27ae60';
-
-      routeCoords.push(coords);
-      route.bounds.push(coords);
-      allBounds.push(coords);
-
-      const popup = `
-        <div style="font-size:13px;color:#111;line-height:1.4;">
-          <b style="font-size:15px;color:${route.color};">📍 ${esc(route.name)} · Точка №${p.number}</b><br>
-          <b>Клієнт:</b> ${esc(p.clientName)}<br>
-          <b>Адреса:</b> ${esc(p.address)}<br>
-          ${p.weight ? `<b>Вага:</b> ${esc(p.weight)}<br>` : ''}
-          ${p.invoices ? `<b>Накладні:</b> ${esc(p.invoices)}<br>` : ''}
-        </div>`;
-
-      const marker = L.marker(coords, { icon: makePinIcon(p.number, route.color) }).addTo(markersGroup);
-      marker.bindPopup(popup);
-
-      p.card.addEventListener('click', () => {
-        map.setView(coords, 16);
-        marker.openPopup();
-        sheet?.classList.remove('expanded');
-      });
+      if (myRun !== runId) return;
+      const r = await geocode(p);
+      if (!r) { setStatus(p, 'missing'); continue; }
+      placePoint(route, p, r.coords, r);
     }
-
-    // Лінія цього маршруту: по дорогах, а якщо не вийшло — пряма
-    if (routeCoords.length > 1 && myRun === runId) {
-      const road = await fetchRoadRoute(routeCoords);
-      L.polyline(road || routeCoords, {
-        color: route.color,
-        weight: 5,
-        opacity: 0.85,
-        lineJoin: 'round',
-        dashArray: road ? null : '8 8'
-      }).addTo(routePolylineGroup);
-    }
+    if (myRun !== runId) return;
+    await redrawRoute(route);
   }
 
-  if (myRun === runId && allBounds.length > 1) {
-    map.fitBounds(L.latLngBounds(allBounds), { padding: [40, 40] });
-  }
+  if (myRun === runId) fitAll(routes);
+}
+
+// ---------- Точки, виправлення, лінії ----------
+let placementTarget = null; // точка, яку користувач ставить вручну
+
+function setStatus(p, kind) {
+  const el = p.statusEl;
+  if (!el) return;
+  const texts = {
+    ok:      ['✅ На карті', '#27ae60'],
+    approx:  ['⚠️ Приблизно (номер будинку не знайдено) — перетягни піну на місце', '#e67e22'],
+    manual:  ['📌 Виправлено вручну', '#2E86DE'],
+    missing: ['⚠️ Не знайдено — тапни по картці, потім по карті', '#e74c3c']
+  };
+  el.textContent = texts[kind][0];
+  el.style.color = texts[kind][1];
+}
+
+function popupHtml(route, p) {
+  return `
+    <div style="font-size:13px;color:#111;line-height:1.4;">
+      <b style="font-size:15px;color:${route.color};">📍 ${esc(route.name)} · Точка №${p.number}</b><br>
+      <b>Клієнт:</b> ${esc(p.clientName)}<br>
+      <b>Адреса:</b> ${esc(p.address)}<br>
+      ${p.weight ? `<b>Вага:</b> ${esc(p.weight)}<br>` : ''}
+      ${p.invoices ? `<b>Накладні:</b> ${esc(p.invoices)}<br>` : ''}
+    </div>`;
+}
+
+function placePoint(route, p, coords, opts) {
+  p.coords = coords;
+  if (p.marker) markersGroup.removeLayer(p.marker);
+
+  const marker = L.marker(coords, { icon: makePinIcon(p.number, route.color), draggable: true }).addTo(markersGroup);
+  marker.bindPopup(popupHtml(route, p));
+
+  // Перетягнув піну → запам'ятали назавжди для цієї адреси
+  marker.on('dragend', () => {
+    const ll = marker.getLatLng();
+    p.coords = [ll.lat, ll.lng];
+    saveManual(p, p.coords);
+    setStatus(p, 'manual');
+    redrawRoute(route);
+  });
+
+  p.marker = marker;
+  setStatus(p, opts.manual ? 'manual' : (opts.exact ? 'ok' : 'approx'));
+}
+
+async function redrawRoute(route) {
+  const my = runId;
+  route.bounds = route.points.filter(p => p.coords).map(p => p.coords);
+  const coords = [BASE_COORDS, ...route.bounds];
+
+  if (route.line) { routePolylineGroup.removeLayer(route.line); route.line = null; }
+  if (coords.length < 2) return;
+
+  const road = await fetchRoadRoute(coords);
+  if (my !== runId) return;
+  if (route.line) routePolylineGroup.removeLayer(route.line);
+
+  route.line = L.polyline(road || coords, {
+    color: route.color,
+    weight: 5,
+    opacity: 0.85,
+    lineJoin: 'round',
+    dashArray: road ? null : '8 8'
+  }).addTo(routePolylineGroup);
+}
+
+function fitAll(routes) {
+  const all = [BASE_COORDS];
+  routes.forEach(r => r.points.forEach(p => { if (p.coords) all.push(p.coords); }));
+  if (all.length > 1) map.fitBounds(L.latLngBounds(all), { padding: [40, 40] });
 }
 
 // Запуск
 initMap();
+
+// Ручна постановка точки: тап по картці → тап по карті
+map.on('click', (e) => {
+  if (!placementTarget) return;
+  const p = placementTarget;
+  placementTarget = null;
+  placePoint(p.route, p, [e.latlng.lat, e.latlng.lng], { manual: true });
+  saveManual(p, p.coords);
+  redrawRoute(p.route);
+});
+    
