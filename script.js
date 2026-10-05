@@ -1,6 +1,11 @@
 // ============================================================
-//  Карта експедитора: кілька маршрутів, надійний геокодинг
+//  Карта експедитора: адмін-панель, нумерація точок,
+//  найшвидший маршрут, кілька маршрутів
 // ============================================================
+
+// ⚠️ ЗМІНИ PIN. Він лежить у коді сайту, тому це захист від випадкових
+// змін, а не від зламу. Справжній захист потребує сервера.
+const ADMIN_PIN = '1234';
 
 let map = null;
 let markersGroup = null;
@@ -9,7 +14,15 @@ let userMarker = null;
 
 let lastValidLocation = null;
 let lastValidTime = 0;
-let runId = 0; // щоб старе завантаження не псувало нове
+
+let runId = 0;        // щоб старе завантаження не псувало нове
+let routes = [];      // весь поточний план
+let uid = 0;
+let busy = false;
+let placementTarget = null; // точка, яку адмін ставить вручну
+
+let isAdmin = false;
+try { isAdmin = sessionStorage.getItem('isAdmin') === '1'; } catch (e) { /* ігноруємо */ }
 
 // База: вул. Аеропортівська, 4
 const BASE_COORDS = [46.4288770, 30.6526377];
@@ -42,6 +55,27 @@ function isInsideOdesaArea(c) {
   if (lon < CITY_BBOX.minLon || lon > CITY_BBOX.maxLon) return false;
   if (lat < CITY_BBOX.minLat || lat > CITY_BBOX.maxLat) return false;
   return distanceKm(BASE_COORDS, c) <= MAX_DIST_FROM_BASE_KM;
+}
+
+function formatDuration(sec) {
+  const m = Math.round(sec / 60);
+  if (m < 60) return `${m} хв`;
+  return `${Math.floor(m / 60)} год ${String(m % 60).padStart(2, '0')} хв`;
+}
+
+let toastTimer = null;
+function toast(msg, ms = 3500) {
+  let t = document.getElementById('adm-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'adm-toast';
+    t.className = 'adm-toast';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.opacity = '0'; }, ms);
 }
 
 // ---------- Карта ----------
@@ -115,7 +149,7 @@ document.getElementById('gpsBtn')?.addEventListener('click', () => {
 const sheet = document.getElementById('bottomSheet');
 document.getElementById('sheetHandle')?.addEventListener('click', () => sheet?.classList.toggle('expanded'));
 
-// ---------- Завантаження Excel (усі листи = маршрути) ----------
+// ---------- Завантаження Excel ----------
 document.getElementById('excelFile').addEventListener('change', function (e) {
   const file = e.target.files ? e.target.files[0] : null;
   if (!file) return;
@@ -126,10 +160,10 @@ document.getElementById('excelFile').addEventListener('change', function (e) {
   reader.onload = function (event) {
     const data = new Uint8Array(event.target.result);
     const workbook = XLSX.read(data, { type: 'array' });
-    const routes = parseWorkbook(workbook);
-    renderRoutes(routes);
+    loadFromExcel(workbook);
   };
   reader.readAsArrayBuffer(file);
+  e.target.value = ''; // щоб той самий файл можна було завантажити ще раз
 });
 
 // ---------- Розбір Excel ----------
@@ -169,30 +203,26 @@ function extractRow(row) {
   return r;
 }
 
-// Чистить адресу: відокремлює назву закладу, прибирає "м. Одеса" / "ОДЕССА", нормалізує "ул." → "вул."
+// Відокремлює назву закладу, прибирає "м. Одеса" / "ОДЕССА", нормалізує "ул." → "вул."
 function parseAddress(raw) {
   let s = String(raw).replace(/\s+/g, ' ').trim();
   let label = '';
 
-  // "Бон Чикен - ОДЕССА м. Одеса вул. Жуковського 40" → label + адреса
   const m = s.match(/^(.*?)\s+[-–—]\s+(.+)$/);
   if (m && !STREET_WORDS.test(m[1])) {
     label = m[1].trim();
     s = m[2].trim();
   }
 
-  // прибираємо "м. Одеса", "г. Одесса", "ОДЕССА"
   s = s.replace(/(?:(?<![а-яіїєґ])(?:м|г)\.?\s*)?(?<![а-яіїєґ])одес+а(?![а-яіїєґ])/gi, ' ');
-  // ул. → вул.
   s = s.replace(/(?<![а-яіїєґ])ул\.?\s*/gi, 'вул. ');
-
   s = s.replace(/\s*,\s*/g, ', ').replace(/^[,\s]+|[,\s]+$/g, '').replace(/\s+/g, ' ');
 
   return { label, street: s };
 }
 
 function parseWorkbook(workbook) {
-  const routes = [];
+  const result = [];
 
   workbook.SheetNames.forEach(sheetName => {
     const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 });
@@ -204,9 +234,8 @@ function parseWorkbook(workbook) {
 
       if (r.isNote) continue;
 
-      // Рядок з написом "Маршрут ..." без адреси = початок нового маршруту
       if (r.routeTitle && !r.address) {
-        if (current.points.length) routes.push(current);
+        if (current.points.length) result.push(current);
         current = { name: r.routeTitle, points: [] };
         continue;
       }
@@ -227,14 +256,15 @@ function parseWorkbook(workbook) {
         street: parsed.street,
         address: parsed.street + ', Одеса',
         weight: r.weight,
-        invoices: r.invoices
+        invoices: r.invoices,
+        origIndex: current.points.length
       });
     }
 
-    if (current.points.length) routes.push(current);
+    if (current.points.length) result.push(current);
   });
 
-  return routes;
+  return result;
 }
 
 // ---------- Геокодинг ----------
@@ -242,12 +272,16 @@ let geoCache = {};
 let manualFixes = {};
 try { geoCache = JSON.parse(localStorage.getItem('geoCache_v3') || '{}'); } catch (e) { geoCache = {}; }
 try { manualFixes = JSON.parse(localStorage.getItem('manualFixes_v1') || '{}'); } catch (e) { manualFixes = {}; }
+
 function saveCache() {
   try { localStorage.setItem('geoCache_v3', JSON.stringify(geoCache)); } catch (e) { /* ігноруємо */ }
 }
+function saveManualStore() {
+  try { localStorage.setItem('manualFixes_v1', JSON.stringify(manualFixes)); } catch (e) { /* ігноруємо */ }
+}
 function saveManual(p, coords) {
   manualFixes[p.address.toLowerCase()] = coords;
-  try { localStorage.setItem('manualFixes_v1', JSON.stringify(manualFixes)); } catch (e) { /* ігноруємо */ }
+  saveManualStore();
 }
 
 let lastNominatimTime = 0;
@@ -276,8 +310,7 @@ async function tryPhoton(query) {
 }
 
 async function tryNominatim(query) {
-  // політика Nominatim: не частіше 1 запиту на секунду
-  const wait = 1100 - (Date.now() - lastNominatimTime);
+  const wait = 1100 - (Date.now() - lastNominatimTime); // політика: ≤ 1 запит/сек
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastNominatimTime = Date.now();
 
@@ -324,34 +357,143 @@ async function geocode(point) {
   return result;
 }
 
-// ---------- Лінія маршруту по дорогах (OSRM) ----------
+// ---------- Дороги (OSRM) ----------
 async function fetchRoadRoute(coords) {
   try {
     const path = coords.map(c => `${c[1]},${c[0]}`).join(';');
     const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${path}?overview=full&geometries=geojson`);
     const data = await res.json();
     if (data.code === 'Ok' && data.routes && data.routes[0]) {
-      return data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+      const r = data.routes[0];
+      return {
+        coords: r.geometry.coordinates.map(c => [c[1], c[0]]),
+        distance: r.distance,
+        duration: r.duration
+      };
     }
   } catch (e) {
-    console.warn('OSRM error:', e);
+    console.warn('OSRM route error:', e);
   }
-  return null; // тоді малюємо пряму лінію
+  return null;
 }
 
-// ---------- Малювання ----------
-function makePinIcon(number, color) {
+// Порядок об'їзду від бази за реальними дорогами. Повертає індекси точок або null
+async function osrmTripOrder(pts) {
+  if (pts.length > 95) return null; // ліміт публічного сервера
+  const all = [BASE_COORDS, ...pts.map(p => p.coords)];
+  const path = all.map(c => `${c[1]},${c[0]}`).join(';');
+  try {
+    const res = await fetch(`https://router.project-osrm.org/trip/v1/driving/${path}?source=first&roundtrip=false&overview=false`);
+    const data = await res.json();
+    if (data.code !== 'Ok' || !data.waypoints || data.waypoints.length !== all.length) return null;
+    const order = data.waypoints
+      .map((w, i) => ({ i, pos: w.waypoint_index }))
+      .filter(x => x.i > 0)
+      .sort((a, b) => a.pos - b.pos)
+      .map(x => x.i - 1);
+    return order.length === pts.length ? order : null;
+  } catch (e) {
+    console.warn('OSRM trip error:', e);
+    return null;
+  }
+}
+
+// Запасний варіант: найближчий сусід + покращення 2-opt (по прямій)
+function localOrder(pts) {
+  const nodes = [BASE_COORDS, ...pts.map(p => p.coords)];
+  const n = nodes.length;
+  const d = (a, b) => distanceKm(nodes[a], nodes[b]);
+
+  const left = new Set();
+  for (let i = 1; i < n; i++) left.add(i);
+  const path = [0];
+  while (left.size) {
+    const last = path[path.length - 1];
+    let best = -1, bd = Infinity;
+    for (const j of left) {
+      const x = d(last, j);
+      if (x < bd) { bd = x; best = j; }
+    }
+    path.push(best);
+    left.delete(best);
+  }
+
+  let improved = true, guard = 0;
+  while (improved && guard++ < 200) {
+    improved = false;
+    for (let i = 1; i < n - 1; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = path[i - 1], b = path[i], c = path[j];
+        const e = j + 1 < n ? path[j + 1] : null;
+        const before = d(a, b) + (e !== null ? d(c, e) : 0);
+        const after = d(a, c) + (e !== null ? d(b, e) : 0);
+        if (after + 1e-9 < before) {
+          path.splice(i, j - i + 1, ...path.slice(i, j + 1).reverse());
+          improved = true;
+        }
+      }
+    }
+  }
+  return path.slice(1).map(i => i - 1);
+}
+
+// ---------- Модель: маршрути і точки ----------
+function makePoint(raw) {
+  return {
+    id: ++uid,
+    clientName: raw.clientName,
+    street: raw.street,
+    address: raw.address,
+    weight: raw.weight || '',
+    invoices: raw.invoices || '',
+    origIndex: raw.origIndex ?? 0,
+    coords: raw.coords || null,
+    exact: !!raw.exact,
+    state: raw.state || 'pending', // pending | ok | approx | manual | missing | placing
+    number: 0,
+    marker: null,
+    card: null,
+    statusEl: null
+  };
+}
+
+function newRoute(name, points, idx) {
+  return {
+    name,
+    points,
+    color: ROUTE_COLORS[idx % ROUTE_COLORS.length],
+    line: null,
+    distance: 0,
+    duration: 0,
+    optimized: false,
+    headerEl: null,
+    token: 0
+  };
+}
+
+function clearMapLayers() {
+  markersGroup.clearLayers();
+  routePolylineGroup.clearLayers();
+  placementTarget = null;
+}
+
+// ---------- Мітки на карті ----------
+function makePinIcon(number, color, isFirst) {
+  const len = String(number).length;
+  const fs = len <= 2 ? 12 : (len === 3 ? 10 : 8); // цифри влазять і при 100+, і при 1000+
+  const stroke = isFirst ? '#22c55e' : '#FFFFFF';
+  const sw = isFirst ? 3 : 2;
   return L.divIcon({
     className: 'orange-pin-marker',
     html: `
-      <div style="position:relative;width:30px;height:38px;display:flex;justify-content:center;align-items:center;">
+      <div style="position:relative;width:30px;height:38px;">
         <svg width="30" height="38" viewBox="0 0 30 38" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M15 0C6.71573 0 0 6.71573 0 15C0 26.25 15 38 15 38C15 38 30 26.25 30 15C30 6.71573 23.2843 0 15 0Z"
-                fill="${color}" stroke="#FFFFFF" stroke-width="2"/>
-          <circle cx="15" cy="14" r="9" fill="${color}"/>
+          <path d="M15 1.5C7.3 1.5 1.5 7.3 1.5 15C1.5 25.5 15 36.5 15 36.5C15 36.5 28.5 25.5 28.5 15C28.5 7.3 22.7 1.5 15 1.5Z"
+                fill="${color}" stroke="${stroke}" stroke-width="${sw}"/>
         </svg>
-        <span style="position:absolute;top:5px;color:#fff;font-weight:bold;font-size:11px;
-                     text-shadow:0 1px 2px rgba(0,0,0,0.6);">${number}</span>
+        <span style="position:absolute;top:6px;left:0;width:30px;text-align:center;line-height:18px;
+                     color:#fff;font-weight:800;font-size:${fs}px;text-shadow:0 1px 2px rgba(0,0,0,0.7);">${number}</span>
+        ${isFirst ? '<span style="position:absolute;top:-13px;left:19px;font-size:15px;line-height:1;">🚩</span>' : ''}
       </div>`,
     iconSize: [30, 38],
     iconAnchor: [15, 38],
@@ -359,165 +501,86 @@ function makePinIcon(number, color) {
   });
 }
 
-async function renderRoutes(routes) {
-  const myRun = ++runId;
-  const listContainer = document.getElementById('pointsList');
-  if (listContainer) listContainer.innerHTML = '';
-  markersGroup.clearLayers();
-  routePolylineGroup.clearLayers();
+function popupEl(route, p) {
+  const d = document.createElement('div');
+  d.style.cssText = 'font-size:13px;color:#111;line-height:1.4;';
+  d.innerHTML = `
+    <b style="font-size:15px;color:${route.color};">📍 ${esc(route.name)} · Точка №${p.number}</b><br>
+    <b>Клієнт:</b> ${esc(p.clientName)}<br>
+    <b>Адреса:</b> ${esc(p.address)}<br>
+    ${p.weight ? `<b>Вага:</b> ${esc(p.weight)}<br>` : ''}
+    ${p.invoices ? `<b>Накладні:</b> ${esc(p.invoices)}<br>` : ''}`;
 
-  if (!routes.length) {
-    if (listContainer) listContainer.innerHTML = '<div style="padding:12px;">Адрес у файлі не знайдено.</div>';
+  if (isAdmin) {
+    const del = document.createElement('button');
+    del.textContent = '🗑 Видалити точку';
+    del.style.cssText = 'margin-top:8px;padding:6px 10px;border:none;border-radius:8px;background:#e74c3c;color:#fff;font-weight:600;';
+    del.addEventListener('click', () => { map.closePopup(); deletePoint(route, p); });
+    d.appendChild(del);
+  }
+  return d;
+}
+
+function refreshMarker(route, p, isFirst) {
+  if (!p.coords) {
+    if (p.marker) { markersGroup.removeLayer(p.marker); p.marker = null; }
     return;
   }
 
-  // 1) Спочатку будуємо всі картки
-  routes.forEach((route, ri) => {
-    route.color = ROUTE_COLORS[ri % ROUTE_COLORS.length];
-    route.bounds = [];
+  const icon = makePinIcon(p.number, route.color, isFirst);
 
-    const header = document.createElement('div');
-    header.style.cssText = `padding:10px 12px;margin:10px 0 6px;border-left:6px solid ${route.color};
-                            font-weight:bold;background:rgba(128,128,128,0.15);border-radius:6px;cursor:pointer;`;
-    header.textContent = `🚚 ${route.name} (${route.points.length})`;
-    header.addEventListener('click', () => {
-      if (route.bounds.length) {
-        map.fitBounds(L.latLngBounds(route.bounds), { padding: [40, 40] });
-        sheet?.classList.remove('expanded');
-      }
+  if (!p.marker) {
+    const m = L.marker(p.coords, { icon, draggable: isAdmin }).addTo(markersGroup);
+    m.bindPopup(() => popupEl(route, p));
+    m.on('dragend', () => {
+      const ll = m.getLatLng();
+      p.coords = [ll.lat, ll.lng];
+      p.state = 'manual';
+      saveManual(p, p.coords);
+      setStatus(p);
+      redrawRoute(route);
+      savePlan();
     });
-    listContainer?.appendChild(header);
-
-    route.points.forEach((p, i) => {
-      p.number = i + 1;
-      const card = document.createElement('div');
-      card.className = 'point-card';
-      card.style.borderLeft = `4px solid ${route.color}`;
-      card.innerHTML = `
-        <div class="point-title">📍 Точка №${p.number}: ${esc(p.clientName)}</div>
-        <div class="point-address"><b>Адреса:</b> ${esc(p.address)}</div>
-        ${p.weight ? `<div class="point-address"><b>Вага:</b> ${esc(p.weight)}</div>` : ''}
-        ${p.invoices ? `<div class="point-address"><b>Накладні:</b> ${esc(p.invoices)}</div>` : ''}
-        <div class="geo-status point-address">⏳ Шукаю на карті…</div>`;
-      listContainer?.appendChild(card);
-      p.card = card;
-      p.route = route;
-      p.statusEl = card.querySelector('.geo-status');
-      card.addEventListener('click', () => {
-        sheet?.classList.remove('expanded');
-        if (p.coords) {
-          map.setView(p.coords, 16);
-          p.marker?.openPopup();
-        } else {
-          placementTarget = p;
-          p.statusEl.textContent = '👆 Тапни на карті, де ця точка';
-          p.statusEl.style.color = '#2E86DE';
-        }
-      });
-    });
-  });
-
-  sheet?.classList.remove('expanded');
-
-  // 2) Геокодимо і малюємо по черзі
-  for (const route of routes) {
-    for (const p of route.points) {
-      if (myRun !== runId) return;
-      const r = await geocode(p);
-      if (!r) { setStatus(p, 'missing'); continue; }
-      placePoint(route, p, r.coords, r);
-    }
-    if (myRun !== runId) return;
-    await redrawRoute(route);
+    p.marker = m;
+  } else {
+    p.marker.setLatLng(p.coords);
+    p.marker.setIcon(icon);
   }
-
-  if (myRun === runId) fitAll(routes);
 }
 
-// ---------- Точки, виправлення, лінії ----------
-let placementTarget = null; // точка, яку користувач ставить вручну
-
-function setStatus(p, kind) {
-  const el = p.statusEl;
-  if (!el) return;
-  const texts = {
-    ok:      ['✅ На карті', '#27ae60'],
-    approx:  ['⚠️ Приблизно (номер будинку не знайдено) — перетягни піну на місце', '#e67e22'],
-    manual:  ['📌 Виправлено вручну', '#2E86DE'],
-    missing: ['⚠️ Не знайдено — тапни по картці, потім по карті', '#e74c3c']
-  };
-  el.textContent = texts[kind][0];
-  el.style.color = texts[kind][1];
+// Нумерація 1..N за порядком у маршруті + підсвітка першої точки
+function refreshRoute(route) {
+  route.points.forEach((p, i) => { p.number = i + 1; });
+  const first = route.points.find(p => p.coords);
+  route.points.forEach(p => refreshMarker(route, p, p === first));
 }
 
-function popupHtml(route, p) {
-  return `
-    <div style="font-size:13px;color:#111;line-height:1.4;">
-      <b style="font-size:15px;color:${route.color};">📍 ${esc(route.name)} · Точка №${p.number}</b><br>
-      <b>Клієнт:</b> ${esc(p.clientName)}<br>
-      <b>Адреса:</b> ${esc(p.address)}<br>
-      ${p.weight ? `<b>Вага:</b> ${esc(p.weight)}<br>` : ''}
-      ${p.invoices ? `<b>Накладні:</b> ${esc(p.invoices)}<br>` : ''}
-    </div>`;
+// ---------- Список (нижня шторка) ----------
+function statusInfo(p) {
+  switch (p.state) {
+    case 'ok':      return ['✅ На карті', '#27ae60'];
+    case 'approx':  return [isAdmin ? '⚠️ Приблизно — перетягни піну на місце' : '⚠️ Приблизно (номер будинку не знайдено)', '#e67e22'];
+    case 'manual':  return ['📌 Виправлено вручну', '#2E86DE'];
+    case 'placing': return ['👆 Тапни на карті, де ця точка', '#2E86DE'];
+    case 'missing': return [isAdmin ? '⚠️ Не знайдено — тапни по картці, потім по карті' : '⚠️ Не знайдено на карті', '#e74c3c'];
+    default:        return ['⏳ Шукаю на карті…', '#999'];
+  }
 }
 
-function placePoint(route, p, coords, opts) {
-  p.coords = coords;
-  if (p.marker) markersGroup.removeLayer(p.marker);
-
-  const marker = L.marker(coords, { icon: makePinIcon(p.number, route.color), draggable: true }).addTo(markersGroup);
-  marker.bindPopup(popupHtml(route, p));
-
-  // Перетягнув піну → запам'ятали назавжди для цієї адреси
-  marker.on('dragend', () => {
-    const ll = marker.getLatLng();
-    p.coords = [ll.lat, ll.lng];
-    saveManual(p, p.coords);
-    setStatus(p, 'manual');
-    redrawRoute(route);
-  });
-
-  p.marker = marker;
-  setStatus(p, opts.manual ? 'manual' : (opts.exact ? 'ok' : 'approx'));
+function setStatus(p) {
+  if (!p.statusEl) return;
+  const [text, color] = statusInfo(p);
+  p.statusEl.textContent = text;
+  p.statusEl.style.color = color;
 }
 
-async function redrawRoute(route) {
-  const my = runId;
-  route.bounds = route.points.filter(p => p.coords).map(p => p.coords);
-  const coords = [BASE_COORDS, ...route.bounds];
-
-  if (route.line) { routePolylineGroup.removeLayer(route.line); route.line = null; }
-  if (coords.length < 2) return;
-
-  const road = await fetchRoadRoute(coords);
-  if (my !== runId) return;
-  if (route.line) routePolylineGroup.removeLayer(route.line);
-
-  route.line = L.polyline(road || coords, {
-    color: route.color,
-    weight: 5,
-    opacity: 0.85,
-    lineJoin: 'round',
-    dashArray: road ? null : '8 8'
-  }).addTo(routePolylineGroup);
+function updateHeader(route) {
+  if (!route.headerEl) return;
+  const parts = [`🚚 ${route.name}`, `${route.points.length} точок`];
+  if (route.distance) parts.push(`${(route.distance / 1000).toFixed(1)} км`);
+  if (route.duration) parts.push(`~${formatDuration(route.duration)}`);
+  if (route.optimized) parts.push('⚡');
+  route.headerEl.textContent = parts.join(' · ');
 }
 
-function fitAll(routes) {
-  const all = [BASE_COORDS];
-  routes.forEach(r => r.points.forEach(p => { if (p.coords) all.push(p.coords); }));
-  if (all.length > 1) map.fitBounds(L.latLngBounds(all), { padding: [40, 40] });
-}
-
-// Запуск
-initMap();
-
-// Ручна постановка точки: тап по картці → тап по карті
-map.on('click', (e) => {
-  if (!placementTarget) return;
-  const p = placementTarget;
-  placementTarget = null;
-  placePoint(p.route, p, [e.latlng.lat, e.latlng.lng], { manual: true });
-  saveManual(p, p.coords);
-  redrawRoute(p.route);
-});
-    
+function toolBtn(text, onClick
